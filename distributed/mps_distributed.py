@@ -441,40 +441,120 @@ class OptimizedMPISNL:
     def _update_X_block_optimized(self):
         """Update X block with optimized communication"""
         
-        # Similar pattern to Y block but for X updates
-        # ... (implement similar to _update_Y_block_optimized)
+        # Prepare X data to send
+        send_requests = []
+        for neighbor_rank, buffer in self.send_buffers.items():
+            buffer_data = []
+            for sensor_id in self.rank_sensors[neighbor_rank]:
+                if sensor_id in self.local_sensors:
+                    sensor = self.sensor_data[sensor_id]
+                    # Pack: [sensor_id, X_k, W_value]
+                    buffer_data.extend([sensor_id])
+                    buffer_data.extend(sensor.X_k.tolist())
+                    buffer_data.append(sensor.W_neighbors.get(sensor_id, 0))
+            
+            if buffer_data:
+                buffer[:len(buffer_data)] = buffer_data
+                req = self.comm.Isend(buffer[:len(buffer_data)], dest=neighbor_rank, tag=2)
+                send_requests.append(req)
         
+        # Receive X data from neighbors
+        recv_requests = []
+        for neighbor_rank, buffer in self.recv_buffers.items():
+            req = self.comm.Irecv(buffer, source=neighbor_rank, tag=2)
+            recv_requests.append((neighbor_rank, req))
+        
+        # Process received X values as they arrive
+        neighbor_X_values = {}
+        for neighbor_rank, req in recv_requests:
+            req.Wait()
+            buffer = self.recv_buffers[neighbor_rank]
+            
+            # Unpack received data
+            buffer_idx = 0
+            while buffer_idx < len(buffer) and buffer[buffer_idx] >= 0:
+                sensor_id = int(buffer[buffer_idx])
+                X_k = np.array(buffer[buffer_idx+1:buffer_idx+1+self.d])
+                W_value = buffer[buffer_idx+1+self.d]
+                
+                if sensor_id not in neighbor_X_values:
+                    neighbor_X_values[sensor_id] = []
+                neighbor_X_values[sensor_id].append((X_k, W_value))
+                
+                buffer_idx += 1 + self.d + 1
+        
+        # Wait for all sends to complete
+        MPI.Request.Waitall(send_requests)
+        
+        # Update X with neighbor contributions and apply proximal operator
         for sensor_id in self.local_sensors:
             sensor = self.sensor_data[sensor_id]
             
-            # Apply W multiplication (simplified for now)
+            # Aggregate neighbor contributions
             v_X = sensor.W_neighbors.get(sensor_id, 0) * sensor.X_k
+            
+            if sensor_id in neighbor_X_values:
+                for X_k, W_value in neighbor_X_values[sensor_id]:
+                    v_X += self.gamma * W_value * X_k
             
             # Proximal operator
             new_X = self._prox_gi(sensor, sensor.Y_k - v_X, self.alpha_mps)
             sensor.X_k = new_X
     
     def _prox_indicator_psd(self, sensor, v, anchor_positions, alpha):
-        """Proximal operator for indicator function"""
-        # Project onto PSD cone
-        # Simplified implementation - in practice would use SDP solver
-        return np.clip(v, -1, 1)
+        """Proximal operator for indicator function - projects onto PSD cone"""
+        from scipy.linalg import eigh
+        
+        # For 2D localization, create the augmented matrix
+        # S = [I_d  v^T]
+        #     [v    Y  ]
+        d = len(v)
+        S = np.zeros((d+1, d+1))
+        S[:d, :d] = np.eye(d)
+        S[:d, d] = v
+        S[d, :d] = v
+        S[d, d] = np.dot(v, v)  # This ensures PSD
+        
+        # Project onto PSD cone via eigenvalue decomposition
+        eigenvalues, eigenvectors = eigh(S)
+        eigenvalues[eigenvalues < 0] = 0  # Project negative eigenvalues to zero
+        S_psd = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+        
+        # Extract the position from projected matrix
+        return S_psd[:d, d]
     
     def _prox_gi(self, sensor, v, alpha):
-        """Proximal operator for gi function"""
-        # Simplified - would use proper optimization
+        """Proximal operator for gi function - minimizes distance measurement errors"""
         result = v.copy()
+        step_size = 0.1 / alpha  # Gradient descent step
         
-        # Apply constraints based on distance measurements
-        for anchor_id in sensor.anchor_neighbors:
-            anchor_pos = self.anchor_positions[anchor_id]
-            measured_dist = sensor.anchor_distances[anchor_id]
+        # Multiple iterations to refine the position
+        for _ in range(5):
+            gradient = np.zeros_like(result)
             
-            # Project to satisfy distance constraint
-            diff = result - anchor_pos
-            current_dist = np.linalg.norm(diff)
-            if current_dist > 0:
-                result = anchor_pos + (measured_dist / current_dist) * diff
+            # Gradient from neighbor distance constraints
+            for neighbor_id, measured_dist in sensor.neighbor_distances.items():
+                if neighbor_id in self.sensor_data:
+                    neighbor_pos = self.sensor_data[neighbor_id].X_k
+                    diff = result - neighbor_pos
+                    actual_dist = np.linalg.norm(diff)
+                    if actual_dist > 1e-6:
+                        # Gradient of squared distance error
+                        gradient += 2 * (actual_dist - measured_dist) * diff / actual_dist
+            
+            # Gradient from anchor distance constraints
+            for anchor_id, measured_dist in sensor.anchor_distances.items():
+                anchor_pos = self.anchor_positions[anchor_id]
+                diff = result - anchor_pos
+                actual_dist = np.linalg.norm(diff)
+                if actual_dist > 1e-6:
+                    gradient += 2 * (actual_dist - measured_dist) * diff / actual_dist
+            
+            # Gradient descent update
+            result = result - step_size * gradient
+            
+            # Proximal term pulls towards v
+            result = (result + alpha * v) / (1 + alpha)
         
         return result
     
