@@ -441,41 +441,57 @@ class OptimizedMPISNL:
     def _update_X_block_optimized(self):
         """Update X block with optimized communication"""
         
-        # Prepare X data to send
-        send_requests = []
-        for neighbor_rank, buffer in self.send_buffers.items():
-            buffer_data = []
-            for sensor_id in self.rank_sensors[neighbor_rank]:
-                if sensor_id in self.local_sensors:
-                    sensor = self.sensor_data[sensor_id]
-                    # Pack: [sensor_id, X_k, W_value]
-                    buffer_data.extend([sensor_id])
-                    buffer_data.extend(sensor.X_k.tolist())
-                    buffer_data.append(sensor.W_neighbors.get(sensor_id, 0))
-            
-            if buffer_data:
-                buffer[:len(buffer_data)] = buffer_data
-                req = self.comm.Isend(buffer[:len(buffer_data)], dest=neighbor_rank, tag=2)
-                send_requests.append(req)
-        
-        # Receive X data from neighbors
-        recv_requests = []
-        for neighbor_rank, buffer in self.recv_buffers.items():
-            req = self.comm.Irecv(buffer, source=neighbor_rank, tag=2)
-            recv_requests.append((neighbor_rank, req))
-        
-        # Process received X values as they arrive
-        neighbor_X_values = {}
-        for neighbor_rank, req in recv_requests:
-            req.Wait()
-            buffer = self.recv_buffers[neighbor_rank]
-            
-            # Unpack received data
+        # Prepare X data to send (similar to Y block pattern)
+        self.send_requests = []
+        for proc in self.neighbor_procs:
+            # Pack data for this processor
             buffer_idx = 0
-            while buffer_idx < len(buffer) and buffer[buffer_idx] >= 0:
-                sensor_id = int(buffer[buffer_idx])
-                X_k = np.array(buffer[buffer_idx+1:buffer_idx+1+self.d])
-                W_value = buffer[buffer_idx+1+self.d]
+            for sensor_id in self.local_sensors:
+                sensor = self.sensor_data[sensor_id]
+                # Check if any neighbor of this sensor is on proc
+                for neighbor in sensor.neighbor_sensors:
+                    if self.sensor_ranks.get(neighbor, -1) == proc:
+                        # Pack: [sensor_id, X_k, W_value]
+                        self.send_buffers[proc][buffer_idx] = sensor_id
+                        self.send_buffers[proc][buffer_idx+1:buffer_idx+1+self.d] = sensor.X_k
+                        self.send_buffers[proc][buffer_idx+1+self.d] = sensor.W_neighbors.get(neighbor, 0)
+                        buffer_idx += 1 + self.d + 1
+            
+            req = self.comm.Isend(self.send_buffers[proc], dest=proc, tag=2)
+            self.send_requests.append(req)
+        
+        # Start non-blocking receives
+        self.recv_requests = []
+        for proc in self.neighbor_procs:
+            req = self.comm.Irecv(self.recv_buffers[proc], source=proc, tag=2)
+            self.recv_requests.append(req)
+        
+        # Local computation while communication happens
+        for sensor_id in self.local_sensors:
+            sensor = self.sensor_data[sensor_id]
+            
+            # Apply W multiplication locally
+            v_X = np.zeros(self.d)
+            for neighbor in sensor.neighbor_sensors:
+                if neighbor in self.local_sensors:
+                    neighbor_sensor = self.sensor_data[neighbor]
+                    v_X += sensor.W_neighbors.get(neighbor, 0) * neighbor_sensor.X_k
+            
+            # Store for later use
+            sensor.v_X_local = v_X
+        
+        # Wait for all communications to complete
+        MPI.Request.Waitall(self.send_requests)
+        MPI.Request.Waitall(self.recv_requests)
+        
+        # Process received data
+        neighbor_X_values = {}
+        for idx, proc in enumerate(self.neighbor_procs):
+            buffer_idx = 0
+            while buffer_idx < len(self.recv_buffers[proc]) and self.recv_buffers[proc][buffer_idx] >= 0:
+                sensor_id = int(self.recv_buffers[proc][buffer_idx])
+                X_k = np.array(self.recv_buffers[proc][buffer_idx+1:buffer_idx+1+self.d])
+                W_value = self.recv_buffers[proc][buffer_idx+1+self.d]
                 
                 if sensor_id not in neighbor_X_values:
                     neighbor_X_values[sensor_id] = []
@@ -483,16 +499,14 @@ class OptimizedMPISNL:
                 
                 buffer_idx += 1 + self.d + 1
         
-        # Wait for all sends to complete
-        MPI.Request.Waitall(send_requests)
-        
         # Update X with neighbor contributions and apply proximal operator
         for sensor_id in self.local_sensors:
             sensor = self.sensor_data[sensor_id]
             
-            # Aggregate neighbor contributions
-            v_X = sensor.W_neighbors.get(sensor_id, 0) * sensor.X_k
+            # Start with local computation
+            v_X = sensor.v_X_local
             
+            # Add contributions from remote neighbors
             if sensor_id in neighbor_X_values:
                 for X_k, W_value in neighbor_X_values[sensor_id]:
                     v_X += self.gamma * W_value * X_k
