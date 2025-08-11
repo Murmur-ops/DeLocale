@@ -46,6 +46,9 @@ class MPSSensorNetwork:
                 pos = np.random.normal(0.5, 0.2, self.d)
                 true_positions[i] = np.clip(pos, 0, 1)
         
+        # Store true positions for error calculation
+        self.true_positions = true_positions
+        
         if anchor_positions is None:
             self.anchor_positions = np.random.uniform(0, 1, (self.n_anchors, self.d))
         else:
@@ -192,9 +195,16 @@ class MPSSensorNetwork:
             if iteration % 10 == 0:
                 obj = self._compute_objective()
                 objectives.append(obj)
-                iteration_times.append(time.time() - iter_start)
                 
-                logger.info(f"MPS Iteration {iteration}: obj={obj:.6f}")
+                # Compute error if we have true positions
+                if hasattr(self, 'true_positions'):
+                    err = self._compute_error()
+                    errors.append(err)
+                    logger.info(f"MPS Iteration {iteration}: obj={obj:.6f}, error={err:.6f}")
+                else:
+                    logger.info(f"MPS Iteration {iteration}: obj={obj:.6f}")
+                
+                iteration_times.append(time.time() - iter_start)
                 
                 # Check convergence
                 if np.linalg.norm(Z - Z_old) < self.tol:
@@ -237,6 +247,18 @@ class MPSSensorNetwork:
                     count += 1
         
         return total_error / max(count, 1)
+    
+    def _compute_error(self):
+        """Compute RMSE error against true positions"""
+        total_error = 0.0
+        
+        for i in range(self.n_sensors):
+            true_pos = self.true_positions[i]
+            estimated_pos = self.sensor_positions[i]
+            error = np.linalg.norm(estimated_pos - true_pos)
+            total_error += error ** 2
+        
+        return np.sqrt(total_error / self.n_sensors)
 
 def test_mps():
     """Test the MPS implementation"""

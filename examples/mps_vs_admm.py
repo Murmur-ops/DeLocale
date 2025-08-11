@@ -49,15 +49,19 @@ def run_comparison():
     admm_results = admm.run_admm()
     admm_time = time.time() - start_time
     
-    # Simulate MPS results (based on our validated performance)
-    print("\nSimulating MPS algorithm (based on validated results)...")
-    mps_results = {
-        'iterations': 40,
-        'converged': True,
-        'errors': list(np.logspace(np.log10(0.3), np.log10(0.04), 5)),
-        'objectives': list(np.logspace(1, -1, 5)),
-        'time': admm_time / 13  # MPS is ~13x faster
-    }
+    # Run MPS algorithm
+    print("\nRunning MPS algorithm...")
+    from core.mps_algorithm import MPSSensorNetwork
+    
+    mps = MPSSensorNetwork(problem_params)
+    mps.generate_network(true_positions, anchor_positions)
+    
+    start_time = time.time()
+    mps_results = mps.run_mps()
+    mps_time = time.time() - start_time
+    
+    # Add timing to results
+    mps_results['time'] = mps_time
     
     # Compare results
     print("\n" + "=" * 60)
