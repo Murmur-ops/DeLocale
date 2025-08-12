@@ -120,7 +120,15 @@ def generate_network_topology_figure():
     ax1.set_xlim(-0.1, 1.1)
     ax1.set_ylim(-0.1, 1.1)
     ax1.grid(True, alpha=0.3)
-    ax1.legend(['Communication Range', 'Links', 'Sensors', 'Anchors'], loc='upper right')
+    
+    # Create proper legend
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], color='gray', alpha=0.3, linewidth=0.5, label='Communication Links'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', markersize=8, label='Sensors'),
+        Line2D([0], [0], marker='^', color='w', markerfacecolor='red', markersize=10, label='Anchors')
+    ]
+    ax1.legend(handles=legend_elements, loc='upper right')
     
     # Right: Localization results
     ax2.set_title('Localization Results (MPS)', fontsize=14, fontweight='bold')
@@ -159,7 +167,15 @@ def generate_network_topology_figure():
     ax2.set_xlim(-0.1, 1.1)
     ax2.set_ylim(-0.1, 1.1)
     ax2.grid(True, alpha=0.3)
-    ax2.legend(['Error', 'True', 'Estimated', 'Anchors'], loc='upper right')
+    
+    # Create proper legend for right plot
+    legend_elements2 = [
+        Line2D([0], [0], color='orange', alpha=0.5, linewidth=1, label='Error Vectors'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', alpha=0.5, markersize=6, label='True Positions'),
+        Line2D([0], [0], marker='x', color='w', markerfacecolor='green', markersize=6, label='MPS Estimates'),
+        Line2D([0], [0], marker='^', color='w', markerfacecolor='red', markersize=10, label='Anchors')
+    ]
+    ax2.legend(handles=legend_elements2, loc='upper right')
     
     plt.suptitle(f'Real Data: {params["n_sensors"]} Sensors, {params["n_anchors"]} Anchors, Range={params["communication_range"]}', 
                 fontsize=16, fontweight='bold')
